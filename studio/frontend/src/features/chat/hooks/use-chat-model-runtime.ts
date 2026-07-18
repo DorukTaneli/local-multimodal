@@ -58,6 +58,7 @@ import type {
   ChatLoraSummary,
   ChatModelSummary,
 } from "../types/runtime";
+import { releaseComfyBeforeLocalModelLoad } from "@/features/comfy/lifecycle";
 
 export type SelectedModelInput = {
   id: string;
@@ -634,6 +635,11 @@ export function useChatModelRuntime() {
               is_lora: isLora,
               gguf_variant: ggufVariant ?? null,
             });
+            // The chat loader is the single owner of the ComfyUI -> chat VRAM
+            // handoff. Offline ComfyUI is reported as success by the endpoint;
+            // an active generation returns busy and aborts before anything can
+            // unload the currently loaded chat model.
+            await releaseComfyBeforeLocalModelLoad();
             // Upgrade consent runs before the security dialogs; Accept installs and the load continues.
             if (validation.requires_transformers_upgrade) {
               const upgraded = await confirmTransformersUpgradeIfNeeded({
