@@ -208,6 +208,38 @@ def test_release_treats_cpu_only_comfy_as_having_no_reserved_vram():
     _drive(http.aclose())
 
 
+def test_release_ignores_directml_placeholder_memory_statistics():
+    free_requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal free_requests
+        if request.url.path == "/system_stats":
+            return httpx.Response(
+                200,
+                json = {
+                    "devices": [
+                        {
+                            "type": "privateuseone",
+                            "name": "privateuseone:0",
+                            "vram_total": 1024**3,
+                            "vram_free": 1024**3,
+                            "torch_vram_total": 1024**3,
+                            "torch_vram_free": 1024**3,
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/prompt":
+            return httpx.Response(200, json = {"exec_info": {"queue_remaining": 0}})
+        free_requests += 1
+        return httpx.Response(200)
+
+    client, http = _client(handler, poll_interval = 0)
+    _drive(client.release())
+    assert free_requests == 1
+    _drive(http.aclose())
+
+
 def test_release_rejects_constant_reserved_vram_with_a_bounded_timeout():
     free_requests = 0
 

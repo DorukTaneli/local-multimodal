@@ -19,6 +19,10 @@ GENERATION_TIMEOUT_SECONDS = 30.0 * 60.0
 RELEASE_TIMEOUT_SECONDS = 30.0
 RELEASE_STABLE_POLLS = 3
 RELEASE_TORCH_RESERVED_TOLERANCE_BYTES = 32 * 1024 * 1024
+# CPU and MPS do not expose discrete VRAM here. torch-directml devices use
+# privateuseone and ComfyUI reports a fixed 1 GiB placeholder for their memory
+# statistics, so none of these values can prove that model memory is retained.
+UNOBSERVABLE_VRAM_DEVICE_TYPES = {"cpu", "mps", "privateuseone"}
 
 
 class ComfyError(RuntimeError):
@@ -151,7 +155,7 @@ class ComfyClient:
         for device in devices:
             if not isinstance(device, dict):
                 raise ComfyError("ComfyUI returned invalid device memory statistics.")
-            if device.get("type") in {"cpu", "mps"}:
+            if device.get("type") in UNOBSERVABLE_VRAM_DEVICE_TYPES:
                 continue
             value = device.get("torch_vram_total")
             if (
