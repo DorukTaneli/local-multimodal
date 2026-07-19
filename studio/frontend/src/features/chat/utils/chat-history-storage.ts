@@ -34,25 +34,9 @@ import {
   isChatThreadDeleted,
   markChatThreadsDeleted,
 } from "./chat-thread-tombstones";
+import { isThreadIncognito } from "./thread-ids";
 
-// Thread ids that belong to a temporary/incognito session. A thread is
-// tagged once, at creation (ensureThreadRecord, when the toggle is on), and
-// stays tagged for its whole lifetime -- the readers and writers below
-// consult this set, never the live toggle. That decoupling is what makes
-// mid-stream toggling safe: flipping the toggle can neither leak an
-// in-flight incognito run into history nor drop a normal thread's writes.
-// Per-thread reads short-circuit too (nothing is stored to fetch); only the
-// thread list stays ungated, so real history still loads next to a
-// temporary chat.
-const incognitoThreadIds = new Set<string>();
-
-export function markThreadIncognito(threadId: string): void {
-  incognitoThreadIds.add(threadId);
-}
-
-function isThreadIncognito(threadId: string): boolean {
-  return incognitoThreadIds.has(threadId);
-}
+export { markThreadIncognito } from "./thread-ids";
 
 type ThreadListArgs = {
   modelType?: ModelType;

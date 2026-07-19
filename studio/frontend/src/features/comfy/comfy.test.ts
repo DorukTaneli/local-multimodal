@@ -6,6 +6,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { markThreadIncognito } from "../chat/utils/thread-ids.ts";
+import { isComfyGenerationEligible } from "./eligibility.ts";
 import { runComfyReroll, runGenerationAfterReview } from "./operations.ts";
 import {
   buildContextProjection,
@@ -33,6 +35,28 @@ const generated = {
     mimeType: "image/png" as const,
   },
 };
+
+test("persisted assistant-ui local ids are eligible but incognito threads stay protected", () => {
+  // Persisted threads reload without an in-memory incognito marker even though
+  // assistant-ui keeps the client-generated `__LOCALID_` as their remote id.
+  const persistedThreadId = "__LOCALID_persisted";
+  const temporaryThreadId = "__LOCALID_incognito";
+  markThreadIncognito(temporaryThreadId);
+
+  const eligible = (remoteId: string) =>
+    isComfyGenerationEligible({
+      checkpoint: "local-model.gguf",
+      incognito: false,
+      modelLoading: false,
+      threadRunning: false,
+      remoteId,
+      activeThreadId: remoteId,
+      visibleText: "A scene worth illustrating",
+    });
+
+  assert.equal(eligible(persistedThreadId), true);
+  assert.equal(eligible(temporaryThreadId), false);
+});
 
 test("Comfy projection includes reviewed tags but not workflow defaults", () => {
   assert.equal(
