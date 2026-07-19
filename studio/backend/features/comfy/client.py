@@ -18,7 +18,7 @@ POLL_INTERVAL_SECONDS = 1.0
 GENERATION_TIMEOUT_SECONDS = 30.0 * 60.0
 RELEASE_TIMEOUT_SECONDS = 30.0
 RELEASE_STABLE_POLLS = 3
-RELEASE_VRAM_TOLERANCE_BYTES = 32 * 1024 * 1024
+RELEASE_TORCH_RESERVED_TOLERANCE_BYTES = 32 * 1024 * 1024
 
 
 class ComfyError(RuntimeError):
@@ -106,28 +106,67 @@ class ComfyClient:
         if not isinstance(payload, dict):
             raise ComfyError("ComfyUI returned an invalid system status response.")
 
-    async def _vram_free_snapshot(self) -> tuple[int, ...]:
-        response = await self._request("GET", "/system_stats")
+    def _release_timeout_error(self) -> ComfyReleaseTimeout:
+        return ComfyReleaseTimeout(
+            f"ComfyUI did not release model memory within "
+            f"{self.release_timeout:g} seconds."
+        )
+
+    async def _request_before_deadline(
+        self,
+        method: str,
+        path: str,
+        *,
+        deadline: float,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise self._release_timeout_error()
+        kwargs["timeout"] = httpx.Timeout(
+            remaining,
+            connect = min(CONNECT_TIMEOUT_SECONDS, remaining),
+        )
+        try:
+            return await asyncio.wait_for(
+                self._request(method, path, **kwargs),
+                timeout = remaining,
+            )
+        except ComfyUnavailableError as exc:
+            if isinstance(exc.__cause__, httpx.TimeoutException):
+                raise self._release_timeout_error() from exc
+            raise
+        except TimeoutError as exc:
+            raise self._release_timeout_error() from exc
+
+    async def _torch_vram_reserved_snapshot(self, *, deadline: float) -> tuple[int, ...]:
+        response = await self._request_before_deadline(
+            "GET", "/system_stats", deadline = deadline
+        )
         payload = self._json(response, "system status")
         devices = payload.get("devices") if isinstance(payload, dict) else None
-        if not isinstance(devices, list):
+        if not isinstance(devices, list) or not devices:
             raise ComfyError("ComfyUI returned invalid device memory statistics.")
-        free_values: list[int] = []
+        reserved_values: list[int] = []
         for device in devices:
-            value = device.get("vram_free") if isinstance(device, dict) else None
+            if not isinstance(device, dict):
+                raise ComfyError("ComfyUI returned invalid device memory statistics.")
+            if device.get("type") in {"cpu", "mps"}:
+                continue
+            value = device.get("torch_vram_total")
             if (
                 isinstance(value, bool)
                 or not isinstance(value, (int, float))
                 or value < 0
             ):
                 raise ComfyError("ComfyUI returned invalid device memory statistics.")
-            free_values.append(int(value))
-        if not free_values:
-            raise ComfyError("ComfyUI returned no device memory statistics.")
-        return tuple(free_values)
+            reserved_values.append(int(value))
+        return tuple(reserved_values)
 
-    async def _queue_remaining(self) -> int:
-        response = await self._request("GET", "/prompt")
+    async def _queue_remaining(self, *, deadline: float) -> int:
+        response = await self._request_before_deadline(
+            "GET", "/prompt", deadline = deadline
+        )
         payload = self._json(response, "queue status")
         exec_info = payload.get("exec_info") if isinstance(payload, dict) else None
         remaining = exec_info.get("queue_remaining") if isinstance(exec_info, dict) else None
@@ -136,11 +175,20 @@ class ComfyClient:
         return remaining
 
     @staticmethod
-    def _vram_is_stable(previous: tuple[int, ...], current: tuple[int, ...]) -> bool:
-        return len(previous) == len(current) and all(
-            abs(before - after) <= RELEASE_VRAM_TOLERANCE_BYTES
-            for before, after in zip(previous, current)
+    def _model_memory_is_released(reserved: tuple[int, ...]) -> bool:
+        return all(
+            value <= RELEASE_TORCH_RESERVED_TOLERANCE_BYTES for value in reserved
         )
+
+    async def _sleep_before_deadline(self, deadline: float) -> None:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise self._release_timeout_error()
+        await asyncio.sleep(min(self.poll_interval, remaining))
+
+    async def _wait_for_idle_queue(self, *, deadline: float) -> None:
+        while await self._queue_remaining(deadline = deadline) != 0:
+            await self._sleep_before_deadline(deadline)
 
     async def available_checkpoints(self) -> list[str]:
         response = await self._request("GET", "/models/checkpoints")
@@ -246,29 +294,42 @@ class ComfyClient:
         return prompt_id, await self.download_image(image)
 
     async def release(self) -> None:
-        previous_vram = await self._vram_free_snapshot()
-        await self._request(
-            "POST",
-            "/free",
-            json = {"unload_models": True, "free_memory": True},
-            timeout = httpx.Timeout(self.release_timeout),
-        )
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.release_timeout
-        stable_polls = 0
         while True:
-            if loop.time() >= deadline:
-                raise ComfyReleaseTimeout(
-                    f"ComfyUI did not release model memory within "
-                    f"{self.release_timeout:g} seconds."
-                )
-            await asyncio.sleep(self.poll_interval)
-            queue_remaining = await self._queue_remaining()
-            current_vram = await self._vram_free_snapshot()
-            if queue_remaining == 0 and self._vram_is_stable(previous_vram, current_vram):
-                stable_polls += 1
-                if stable_polls >= RELEASE_STABLE_POLLS:
-                    return
-            else:
-                stable_polls = 0
-            previous_vram = current_vram
+            # ComfyUI consumes /free flags between queued jobs. Posting while a
+            # backlog exists could unload only for the next job to reload the
+            # checkpoint, so establish an idle boundary first.
+            await self._wait_for_idle_queue(deadline = deadline)
+            await self._request_before_deadline(
+                "POST",
+                "/free",
+                deadline = deadline,
+                json = {"unload_models": True, "free_memory": True},
+            )
+
+            released_polls = 0
+            while True:
+                await self._sleep_before_deadline(deadline)
+                if await self._queue_remaining(deadline = deadline) != 0:
+                    # New work won the race after the idle check. Let it drain,
+                    # then issue a fresh /free after its models are no longer in use.
+                    break
+                reserved = await self._torch_vram_reserved_snapshot(deadline = deadline)
+                if self._model_memory_is_released(reserved):
+                    released_polls += 1
+                    if released_polls >= RELEASE_STABLE_POLLS:
+                        # Recheck both signals before handing VRAM to llama.cpp.
+                        if await self._queue_remaining(deadline = deadline) != 0:
+                            break
+                        final_reserved = await self._torch_vram_reserved_snapshot(
+                            deadline = deadline
+                        )
+                        if (
+                            self._model_memory_is_released(final_reserved)
+                            and await self._queue_remaining(deadline = deadline) == 0
+                        ):
+                            return
+                        break
+                else:
+                    released_polls = 0

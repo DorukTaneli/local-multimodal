@@ -20,6 +20,7 @@ from .client import (
     ComfyClient,
     ComfyError,
     ComfyGenerationTimeout,
+    ComfyReleaseTimeout,
     ComfyUnavailableError,
 )
 from .models import (
@@ -180,6 +181,8 @@ async def release() -> ReleaseResponse:
                     await client.release()
             except ComfyUnavailableError:
                 return ReleaseResponse(offline = True)
+            except ComfyReleaseTimeout as exc:
+                raise HTTPException(status_code = 504, detail = str(exc)) from exc
             except ComfyError as exc:
                 raise HTTPException(status_code = 502, detail = str(exc)) from exc
             return ReleaseResponse()

@@ -77,6 +77,24 @@ def test_release_treats_offline_comfy_as_already_released(monkeypatch):
     assert response.offline is True
 
 
+def test_release_timeout_is_reported_as_gateway_timeout(monkeypatch):
+    class TimeoutClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+        async def release(self):
+            raise router_module.ComfyReleaseTimeout("release timed out")
+
+    monkeypatch.setattr(router_module, "ComfyClient", TimeoutClient)
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(router_module.release())
+    assert exc_info.value.status_code == 504
+    assert "release timed out" in str(exc_info.value.detail)
+
+
 def test_generate_preflights_without_releasing_models(monkeypatch):
     workflow_path = (
         workflow_module.REPOSITORY_ROOT / "comfy" / workflow_module.WORKFLOW_FILENAME

@@ -142,18 +142,10 @@ def test_generate_submits_finds_output_and_downloads_png():
     _drive(http.aclose())
 
 
-def test_release_sends_both_memory_flags_and_waits_for_vram_to_settle():
-    captured = {}
-    free_vram = iter(
-        [
-            1_000_000_000,
-            1_000_000_000,
-            7_000_000_000,
-            7_000_000_000,
-            7_000_000_000,
-            7_000_000_000,
-        ]
-    )
+def test_release_waits_for_idle_reissues_and_requires_released_reserved_vram():
+    captured = []
+    queue_remaining = iter([1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0])
+    torch_reserved = iter([6_000_000_000, 0, 0, 0, 0])
     paths = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -161,43 +153,89 @@ def test_release_sends_both_memory_flags_and_waits_for_vram_to_settle():
         if request.url.path == "/system_stats":
             return httpx.Response(
                 200,
-                json = {"devices": [{"vram_free": next(free_vram)}]},
+                json = {"devices": [{"torch_vram_total": next(torch_reserved)}]},
             )
         if request.url.path == "/prompt":
-            return httpx.Response(200, json = {"exec_info": {"queue_remaining": 0}})
+            return httpx.Response(
+                200,
+                json = {"exec_info": {"queue_remaining": next(queue_remaining)}},
+            )
         assert request.url.path == "/free"
-        captured.update(json.loads(request.content))
+        captured.append(json.loads(request.content))
         return httpx.Response(200)
 
     client, http = _client(handler, poll_interval = 0)
     _drive(client.release())
-    assert captured == {"unload_models": True, "free_memory": True}
-    assert paths == [
-        "/system_stats",
-        "/free",
-        "/prompt",
-        "/system_stats",
-        "/prompt",
-        "/system_stats",
-        "/prompt",
-        "/system_stats",
-        "/prompt",
-        "/system_stats",
-        "/prompt",
-        "/system_stats",
+    assert captured == [
+        {"unload_models": True, "free_memory": True},
+        {"unload_models": True, "free_memory": True},
     ]
+    assert paths[:3] == ["/prompt", "/prompt", "/free"]
+    assert paths.count("/free") == 2
     _drive(http.aclose())
 
 
-def test_release_waits_for_queue_and_has_a_bounded_timeout():
+def test_release_accepts_an_already_unloaded_comfy():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/system_stats":
-            return httpx.Response(200, json = {"devices": [{"vram_free": 1_000}]})
+            return httpx.Response(200, json = {"devices": [{"torch_vram_total": 0}]})
         if request.url.path == "/prompt":
-            return httpx.Response(200, json = {"exec_info": {"queue_remaining": 1}})
+            return httpx.Response(200, json = {"exec_info": {"queue_remaining": 0}})
         return httpx.Response(200)
 
-    client, http = _client(handler, poll_interval = 0, release_timeout = 0.001)
+    client, http = _client(handler, poll_interval = 0)
+    _drive(client.release())
+    _drive(http.aclose())
+
+
+def test_release_treats_cpu_only_comfy_as_having_no_reserved_vram():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/system_stats":
+            return httpx.Response(
+                200,
+                json = {
+                    "devices": [
+                        {"type": "cpu", "torch_vram_total": 64_000_000_000}
+                    ]
+                },
+            )
+        if request.url.path == "/prompt":
+            return httpx.Response(200, json = {"exec_info": {"queue_remaining": 0}})
+        return httpx.Response(200)
+
+    client, http = _client(handler, poll_interval = 0)
+    _drive(client.release())
+    _drive(http.aclose())
+
+
+def test_release_rejects_constant_reserved_vram_with_a_bounded_timeout():
+    free_requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal free_requests
+        if request.url.path == "/system_stats":
+            return httpx.Response(
+                200,
+                json = {"devices": [{"torch_vram_total": 6_000_000_000}]},
+            )
+        if request.url.path == "/prompt":
+            return httpx.Response(200, json = {"exec_info": {"queue_remaining": 0}})
+        free_requests += 1
+        return httpx.Response(200)
+
+    client, http = _client(handler, poll_interval = 0, release_timeout = 0.01)
+    with pytest.raises(ComfyReleaseTimeout, match = "did not release model memory"):
+        _drive(client.release())
+    assert free_requests == 1
+    _drive(http.aclose())
+
+
+def test_release_deadline_cancels_a_slow_initial_request():
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(1)
+        return httpx.Response(200, json = {"exec_info": {"queue_remaining": 0}})
+
+    client, http = _client(handler, poll_interval = 0, release_timeout = 0.01)
     with pytest.raises(ComfyReleaseTimeout, match = "did not release model memory"):
         _drive(client.release())
     _drive(http.aclose())
