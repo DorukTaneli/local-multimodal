@@ -14,6 +14,7 @@ from features.comfy.client import (
     ComfyClient,
     ComfyGenerationError,
     ComfyGenerationTimeout,
+    ComfyReleaseTimeout,
     ComfyUnavailableError,
 )
 
@@ -141,14 +142,62 @@ def test_generate_submits_finds_output_and_downloads_png():
     _drive(http.aclose())
 
 
-def test_release_sends_both_memory_flags():
+def test_release_sends_both_memory_flags_and_waits_for_vram_to_settle():
     captured = {}
+    free_vram = iter(
+        [
+            1_000_000_000,
+            1_000_000_000,
+            7_000_000_000,
+            7_000_000_000,
+            7_000_000_000,
+            7_000_000_000,
+        ]
+    )
+    paths = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/system_stats":
+            return httpx.Response(
+                200,
+                json = {"devices": [{"vram_free": next(free_vram)}]},
+            )
+        if request.url.path == "/prompt":
+            return httpx.Response(200, json = {"exec_info": {"queue_remaining": 0}})
+        assert request.url.path == "/free"
         captured.update(json.loads(request.content))
-        return httpx.Response(200, json = {})
+        return httpx.Response(200)
 
-    client, http = _client(handler)
+    client, http = _client(handler, poll_interval = 0)
     _drive(client.release())
     assert captured == {"unload_models": True, "free_memory": True}
+    assert paths == [
+        "/system_stats",
+        "/free",
+        "/prompt",
+        "/system_stats",
+        "/prompt",
+        "/system_stats",
+        "/prompt",
+        "/system_stats",
+        "/prompt",
+        "/system_stats",
+        "/prompt",
+        "/system_stats",
+    ]
+    _drive(http.aclose())
+
+
+def test_release_waits_for_queue_and_has_a_bounded_timeout():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/system_stats":
+            return httpx.Response(200, json = {"devices": [{"vram_free": 1_000}]})
+        if request.url.path == "/prompt":
+            return httpx.Response(200, json = {"exec_info": {"queue_remaining": 1}})
+        return httpx.Response(200)
+
+    client, http = _client(handler, poll_interval = 0, release_timeout = 0.001)
+    with pytest.raises(ComfyReleaseTimeout, match = "did not release model memory"):
+        _drive(client.release())
     _drive(http.aclose())

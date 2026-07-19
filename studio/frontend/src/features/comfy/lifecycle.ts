@@ -5,6 +5,8 @@ import { releaseComfy } from "./api";
 
 export async function releaseComfyBeforeLocalModelLoad(): Promise<void> {
   try {
+    // The backend returns only after ComfyUI's asynchronous /free request has
+    // drained the queue and its reported VRAM has settled.
     await releaseComfy();
   } catch (error) {
     if (error instanceof Error) {
