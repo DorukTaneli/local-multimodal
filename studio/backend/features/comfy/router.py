@@ -26,6 +26,7 @@ from .models import (
     GenerateRequest,
     GeneratedAsset,
     GenerateResponse,
+    JSON_SAFE_INTEGER_MAX,
     ReleaseResponse,
     StatusResponse,
 )
@@ -133,7 +134,9 @@ async def generate(payload: GenerateRequest) -> GenerateResponse:
             except ValueError as exc:
                 raise HTTPException(status_code = 400, detail = str(exc)) from exc
             checkpoint = checkpoint_name(workflow)
-            seed = secrets.randbelow(2**64)
+            # JSON numbers are decoded as IEEE-754 doubles by the frontend.
+            # Stay within the exact integer range so persisted seeds remain reproducible.
+            seed = secrets.randbelow(JSON_SAFE_INTEGER_MAX + 1)
             generated_workflow = mutate_workflow(
                 workflow,
                 prompt = prompt,

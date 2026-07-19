@@ -121,6 +121,45 @@ def test_generate_preflights_without_releasing_models(monkeypatch):
     assert response.asset.mimeType == "image/png"
 
 
+def test_generate_uses_a_json_safe_seed(monkeypatch):
+    workflow_path = (
+        workflow_module.REPOSITORY_ROOT / "comfy" / workflow_module.WORKFLOW_FILENAME
+    )
+    workflow = json.loads(workflow_path.read_text(encoding = "utf-8"))
+    expected_seed = router_module.JSON_SAFE_INTEGER_MAX
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+        async def preflight(self, _checkpoint):
+            return None
+
+        async def generate(self, submitted, *, save_node_id):
+            assert save_node_id == "7"
+            assert submitted["5"]["inputs"]["seed"] == expected_seed
+            return "prompt-1", PNG_SIGNATURE + b"payload"
+
+    def safe_randbelow(exclusive_upper_bound):
+        assert exclusive_upper_bound == expected_seed + 1
+        return expected_seed
+
+    monkeypatch.setattr(router_module, "ComfyClient", FakeClient)
+    monkeypatch.setattr(router_module, "load_workflow", lambda: workflow)
+    monkeypatch.setattr(router_module, "save_png", lambda _png: uuid4())
+    monkeypatch.setattr(router_module.secrets, "randbelow", safe_randbelow)
+
+    response = asyncio.run(
+        router_module.generate(
+            GenerateRequest(imageTags = "1girl, wink", conversationTags = "night")
+        )
+    )
+    assert response.asset.seed == expected_seed
+
+
 def test_status_reports_preflight_and_busy_state(monkeypatch):
     workflow_path = (
         workflow_module.REPOSITORY_ROOT / "comfy" / workflow_module.WORKFLOW_FILENAME

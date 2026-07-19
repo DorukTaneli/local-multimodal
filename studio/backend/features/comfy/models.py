@@ -6,6 +6,9 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
+JSON_SAFE_INTEGER_MAX = (1 << 53) - 1
+
+
 class GenerateRequest(BaseModel):
     imageTags: str | None = Field(default = None, max_length = 100_000)
     conversationTags: str | None = Field(default = None, max_length = 100_000)
@@ -14,7 +17,7 @@ class GenerateRequest(BaseModel):
 
 class GeneratedAsset(BaseModel):
     assetId: str
-    seed: int
+    seed: int = Field(ge = 0, le = JSON_SAFE_INTEGER_MAX)
     width: int
     height: int
     mimeType: str = "image/png"

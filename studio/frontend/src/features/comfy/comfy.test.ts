@@ -84,6 +84,16 @@ test("serializer accepts only a complete Comfy result", () => {
     extractComfyContextProjection({ ...complete, toolName: "image_generation" }),
     null,
   );
+  assert.equal(
+    extractComfyContextProjection({
+      ...complete,
+      result: {
+        ...complete.result,
+        assets: [{ ...generated.asset, seed: Number.MAX_SAFE_INTEGER + 1 }],
+      },
+    }),
+    null,
+  );
 });
 
 test("initial generation orders preflight, eject, generate, then persistence", async () => {

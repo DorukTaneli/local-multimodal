@@ -10,7 +10,7 @@ function isAsset(value: unknown): value is ComfyAsset {
     typeof asset.assetId === "string" &&
     asset.assetId.length > 0 &&
     typeof asset.seed === "number" &&
-    Number.isFinite(asset.seed) &&
+    Number.isSafeInteger(asset.seed) &&
     typeof asset.width === "number" &&
     asset.width > 0 &&
     typeof asset.height === "number" &&
