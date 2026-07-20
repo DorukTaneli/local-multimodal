@@ -49,6 +49,19 @@ class ComfyReleaseTimeout(ComfyError):
     """ComfyUI did not finish releasing model memory before the deadline."""
 
 
+class ComfyReleaseUnverifiableError(ComfyError):
+    """ComfyUI accepted cleanup but cannot expose when it has completed."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "ComfyUI accepted the model-memory cleanup request, but this "
+            "backend does not expose allocator reservations or a cleanup "
+            "completion event. Stop ComfyUI before retrying, or run ComfyUI "
+            "on an observable accelerator backend that reports allocator "
+            "reservations."
+        )
+
+
 def comfy_base_url() -> str:
     return (os.environ.get("COMFY_BASE_URL") or DEFAULT_COMFY_BASE_URL).strip().rstrip("/")
 
@@ -180,7 +193,7 @@ class ComfyClient:
 
     @staticmethod
     def _model_memory_is_released(reserved: tuple[int, ...]) -> bool:
-        return all(
+        return bool(reserved) and all(
             value <= RELEASE_TORCH_RESERVED_TOLERANCE_BYTES for value in reserved
         )
 
@@ -312,7 +325,20 @@ class ComfyClient:
                 json = {"unload_models": True, "free_memory": True},
             )
 
-            released_polls = 0
+            reserved = await self._torch_vram_reserved_snapshot(deadline = deadline)
+            if not reserved:
+                # ComfyUI's /free response only acknowledges that worker flags
+                # were set. The worker emits no event after consuming them, and
+                # prompt history is written before unload_all_models runs. A
+                # queue/history fence therefore cannot prove cleanup: explicit
+                # priorities bypass sequence counters, history is mutable, and
+                # another prompt can complete between separate snapshots.
+                # Refuse to hand memory to llama.cpp when /system_stats exposes
+                # no allocator reservation signal. The cleanup request remains
+                # useful, but its completion cannot be reported truthfully.
+                raise ComfyReleaseUnverifiableError()
+
+            released_polls = int(self._model_memory_is_released(reserved))
             while True:
                 await self._sleep_before_deadline(deadline)
                 if await self._queue_remaining(deadline = deadline) != 0:

@@ -15,6 +15,7 @@ from features.comfy.client import (
     ComfyGenerationError,
     ComfyGenerationTimeout,
     ComfyReleaseTimeout,
+    ComfyReleaseUnverifiableError,
     ComfyUnavailableError,
 )
 
@@ -188,8 +189,19 @@ def test_release_accepts_an_already_unloaded_comfy():
     _drive(http.aclose())
 
 
-def test_release_treats_cpu_only_comfy_as_having_no_reserved_vram():
+def test_release_requests_cleanup_but_rejects_unobservable_cpu_memory():
+    requests = []
+
     def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.url.path == "/prompt" and request.method == "GET":
+            return httpx.Response(200, json = {"exec_info": {"queue_remaining": 0}})
+        if request.url.path == "/free":
+            assert json.loads(request.content) == {
+                "unload_models": True,
+                "free_memory": True,
+            }
+            return httpx.Response(200)
         if request.url.path == "/system_stats":
             return httpx.Response(
                 200,
@@ -199,20 +211,34 @@ def test_release_treats_cpu_only_comfy_as_having_no_reserved_vram():
                     ]
                 },
             )
-        if request.url.path == "/prompt":
-            return httpx.Response(200, json = {"exec_info": {"queue_remaining": 0}})
-        return httpx.Response(200)
+        pytest.fail(f"release must not manufacture a prompt/history proof: {request.url.path}")
 
     client, http = _client(handler, poll_interval = 0)
-    _drive(client.release())
+    with pytest.raises(
+        ComfyReleaseUnverifiableError,
+        match = "Stop ComfyUI before retrying",
+    ):
+        _drive(client.release())
+    assert requests == [
+        ("GET", "/prompt"),
+        ("POST", "/free"),
+        ("GET", "/system_stats"),
+    ]
     _drive(http.aclose())
 
 
-def test_release_ignores_directml_placeholder_memory_statistics():
+def test_release_rejects_explicit_priority_interloper_with_no_history_gap():
     free_requests = 0
+    prompt_submissions = 0
+    history_reads = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal free_requests
+        nonlocal free_requests, prompt_submissions, history_reads
+        if request.url.path == "/prompt" and request.method == "GET":
+            return httpx.Response(200, json = {"exec_info": {"queue_remaining": 0}})
+        if request.url.path == "/free":
+            free_requests += 1
+            return httpx.Response(200)
         if request.url.path == "/system_stats":
             return httpx.Response(
                 200,
@@ -220,23 +246,76 @@ def test_release_ignores_directml_placeholder_memory_statistics():
                     "devices": [
                         {
                             "type": "privateuseone",
-                            "name": "privateuseone:0",
-                            "vram_total": 1024**3,
-                            "vram_free": 1024**3,
                             "torch_vram_total": 1024**3,
-                            "torch_vram_free": 1024**3,
                         }
                     ]
                 },
             )
-        if request.url.path == "/prompt":
-            return httpx.Response(200, json = {"exec_info": {"queue_remaining": 0}})
-        free_requests += 1
-        return httpx.Response(200)
+
+        # This is the response surface that made the deleted-history proof
+        # unsafe. A real explicit-priority submission does not advance Comfy's
+        # default self.number, and its history can be deleted, so the two fence
+        # responses can still look consecutive with no visible history gap.
+        if request.url.path == "/prompt" and request.method == "POST":
+            prompt_submissions += 1
+            return httpx.Response(
+                200,
+                json = {
+                    "prompt_id": f"fence-{prompt_submissions}",
+                    "number": 40 + prompt_submissions,
+                },
+            )
+        if request.url.path.startswith("/history"):
+            history_reads += 1
+            return httpx.Response(200, json = {"fence-1": {}, "fence-2": {}})
+        pytest.fail(f"unexpected request: {request.url.path}")
 
     client, http = _client(handler, poll_interval = 0)
-    _drive(client.release())
+    with pytest.raises(ComfyReleaseUnverifiableError):
+        _drive(client.release())
     assert free_requests == 1
+    assert prompt_submissions == 0
+    assert history_reads == 0
+    _drive(http.aclose())
+
+
+def test_release_rejects_work_completing_between_history_and_queue_snapshots():
+    free_requests = 0
+    queue_reads = 0
+    history_reads = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal free_requests, queue_reads, history_reads
+        if request.url.path == "/prompt" and request.method == "GET":
+            queue_reads += 1
+            # A separate prompt can finish after a history snapshot and before
+            # this read. Both snapshots then look clean even though it may have
+            # reloaded a model; the public endpoints offer no atomic boundary.
+            return httpx.Response(200, json = {"exec_info": {"queue_remaining": 0}})
+        if request.url.path == "/free":
+            free_requests += 1
+            return httpx.Response(200)
+        if request.url.path == "/system_stats":
+            return httpx.Response(
+                200,
+                json = {"devices": [{"type": "mps", "torch_vram_total": 0}]},
+            )
+        if request.url.path.startswith("/history"):
+            history_reads += 1
+            return httpx.Response(200, json = {"fence-1": {}, "fence-2": {}})
+        if request.url.path == "/prompt" and request.method == "POST":
+            return httpx.Response(
+                200,
+                json = {"prompt_id": "fence-1", "number": 1},
+            )
+        pytest.fail(f"unexpected request: {request.url.path}")
+
+    client, http = _client(handler, poll_interval = 0)
+    with pytest.raises(ComfyReleaseUnverifiableError):
+        _drive(client.release())
+    assert free_requests == 1
+    assert queue_reads == 1
+    assert history_reads == 0
     _drive(http.aclose())
 
 

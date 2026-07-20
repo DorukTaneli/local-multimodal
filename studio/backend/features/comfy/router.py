@@ -21,6 +21,7 @@ from .client import (
     ComfyError,
     ComfyGenerationTimeout,
     ComfyReleaseTimeout,
+    ComfyReleaseUnverifiableError,
     ComfyUnavailableError,
 )
 from .models import (
@@ -183,6 +184,11 @@ async def release() -> ReleaseResponse:
                 return ReleaseResponse(offline = True)
             except ComfyReleaseTimeout as exc:
                 raise HTTPException(status_code = 504, detail = str(exc)) from exc
+            except ComfyReleaseUnverifiableError as exc:
+                # ComfyUI is online, but its current backend cannot prove that
+                # memory cleanup finished. The caller must change that state by
+                # stopping ComfyUI or using an observable accelerator backend.
+                raise HTTPException(status_code = 409, detail = str(exc)) from exc
             except ComfyError as exc:
                 raise HTTPException(status_code = 502, detail = str(exc)) from exc
             return ReleaseResponse()

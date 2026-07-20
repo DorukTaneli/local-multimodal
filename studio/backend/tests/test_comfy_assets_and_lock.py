@@ -95,6 +95,26 @@ def test_release_timeout_is_reported_as_gateway_timeout(monkeypatch):
     assert "release timed out" in str(exc_info.value.detail)
 
 
+def test_release_unverifiable_backend_is_an_actionable_conflict(monkeypatch):
+    class UnverifiableClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+        async def release(self):
+            raise router_module.ComfyReleaseUnverifiableError()
+
+    monkeypatch.setattr(router_module, "ComfyClient", UnverifiableClient)
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(router_module.release())
+    assert exc_info.value.status_code == 409
+    detail = str(exc_info.value.detail)
+    assert "Stop ComfyUI before retrying" in detail
+    assert "observable accelerator backend" in detail
+
+
 def test_generate_preflights_without_releasing_models(monkeypatch):
     workflow_path = (
         workflow_module.REPOSITORY_ROOT / "comfy" / workflow_module.WORKFLOW_FILENAME
