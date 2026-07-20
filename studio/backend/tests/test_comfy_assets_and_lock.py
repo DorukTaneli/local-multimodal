@@ -11,7 +11,14 @@ from fastapi import HTTPException
 import pytest
 
 from features.comfy import assets as assets_module
-from features.comfy.assets import AssetError, PNG_SIGNATURE, resolve_png_asset, save_png
+from features.comfy.assets import (
+    AssetError,
+    PNG_SIGNATURE,
+    delete_png_asset,
+    resolve_png_asset,
+    save_png,
+)
+from features.comfy.coordinator import accelerator_coordinator
 from features.comfy.models import GenerateRequest
 import features.comfy.router as router_module
 from features.comfy import workflow as workflow_module
@@ -24,6 +31,13 @@ def test_uuid_asset_storage_and_resolution(tmp_path, monkeypatch):
     path = resolve_png_asset(str(asset_id))
     assert path == (tmp_path / "assets" / "comfy" / f"{asset_id}.png").resolve()
     assert path.read_bytes() == PNG_SIGNATURE + b"payload"
+
+
+def test_asset_deletion_removes_the_studio_owned_png(tmp_path, monkeypatch):
+    monkeypatch.setattr(assets_module, "assets_root", lambda: tmp_path / "assets")
+    asset_id = save_png(PNG_SIGNATURE + b"payload")
+    delete_png_asset(str(asset_id))
+    assert not (tmp_path / "assets" / "comfy" / f"{asset_id}.png").exists()
 
 
 @pytest.mark.parametrize("asset_id", ["../secret", "not-a-uuid", f"{uuid4()}.png"])
@@ -51,11 +65,11 @@ def test_non_png_file_with_uuid_name_is_not_served(tmp_path, monkeypatch):
 
 def test_release_is_rejected_promptly_while_generation_slot_is_owned():
     async def scenario():
-        async with router_module.operation_slot():
+        async with accelerator_coordinator.slot("image generation"):
             with pytest.raises(HTTPException) as exc_info:
                 await router_module.release()
             assert exc_info.value.status_code == 409
-            assert "busy" in str(exc_info.value.detail).lower()
+            assert "image generation is active" in str(exc_info.value.detail).lower()
 
     asyncio.run(scenario())
 
@@ -144,6 +158,9 @@ def test_generate_preflights_without_releasing_models(monkeypatch):
     monkeypatch.setattr(router_module, "ComfyClient", FakeClient)
     monkeypatch.setattr(router_module, "load_workflow", lambda: workflow)
     monkeypatch.setattr(router_module, "save_png", lambda _png: asset_id)
+    async def unload_chat_model():
+        calls.append("unload-chat")
+    monkeypatch.setattr(accelerator_coordinator, "unload_chat_model", unload_chat_model)
 
     response = asyncio.run(
         router_module.generate(
@@ -152,6 +169,7 @@ def test_generate_preflights_without_releasing_models(monkeypatch):
     )
     assert calls == [
         "preflight:prefectIllustriousXL_v70.safetensors",
+        "unload-chat",
         "generate:7",
     ]
     assert response.asset.assetId == str(asset_id)
@@ -189,6 +207,9 @@ def test_generate_uses_a_json_safe_seed(monkeypatch):
     monkeypatch.setattr(router_module, "load_workflow", lambda: workflow)
     monkeypatch.setattr(router_module, "save_png", lambda _png: uuid4())
     monkeypatch.setattr(router_module.secrets, "randbelow", safe_randbelow)
+    async def unload_chat_model():
+        return None
+    monkeypatch.setattr(accelerator_coordinator, "unload_chat_model", unload_chat_model)
 
     response = asyncio.run(
         router_module.generate(
@@ -227,7 +248,7 @@ def test_status_reports_preflight_and_busy_state(monkeypatch):
     assert ready.checkpointAvailable is True
 
     async def busy_scenario():
-        async with router_module.operation_slot():
+        async with accelerator_coordinator.slot("image generation"):
             return await router_module.status()
 
     busy = asyncio.run(busy_scenario())
@@ -242,4 +263,5 @@ def test_router_exposes_exact_comfy_interfaces():
         ("/generate", "POST"),
         ("/release", "POST"),
         ("/assets/{asset_id}", "GET"),
+        ("/assets/{asset_id}", "DELETE"),
     }

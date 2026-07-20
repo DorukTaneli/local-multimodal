@@ -15,9 +15,13 @@ import { toast } from "@/lib/toast";
 import { useAui, useAuiState } from "@assistant-ui/react";
 import { ImagePlusIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { generateComfyImage, getComfyStatus, requireReadyComfy } from "./api";
+import {
+  deleteComfyAsset,
+  generateComfyImage,
+  getComfyStatus,
+  requireReadyComfy,
+} from "./api";
 import { generateHiddenImageTags } from "./hidden-tags";
-import { useComfyModelLifecycle } from "./use-model-lifecycle";
 import { runGenerationAfterReview } from "./operations";
 import {
   appendComfyToolPart,
@@ -43,7 +47,6 @@ function visibleAssistantText(content: readonly unknown[]): string {
 
 export function ComfyGenerateImageAction() {
   const aui = useAui();
-  const ejectModel = useComfyModelLifecycle();
   const messageId = useAuiState(({ message }) => message.id);
   const content = useAuiState(({ message }) => message.content);
   const threadRunning = useAuiState(({ thread }) => thread.isRunning);
@@ -100,7 +103,6 @@ export function ComfyGenerateImageAction() {
       await runGenerationAfterReview({
         status: getComfyStatus,
         requireReady: requireReadyComfy,
-        eject: ejectModel,
         generate: () =>
           generateComfyImage({
             imageTags: imageTags.trim(),
@@ -125,6 +127,7 @@ export function ComfyGenerateImageAction() {
             },
           });
         },
+        discard: (asset) => deleteComfyAsset(asset.assetId),
       });
       setDialogOpen(false);
     } catch (error) {

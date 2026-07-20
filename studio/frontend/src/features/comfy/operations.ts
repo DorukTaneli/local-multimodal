@@ -6,32 +6,36 @@ import type { ComfyAsset, ComfyGenerationResult, ComfyStatus } from "./types.ts"
 export async function runGenerationAfterReview(deps: {
   status: () => Promise<ComfyStatus>;
   requireReady: (status: ComfyStatus) => void;
-  eject: () => Promise<boolean>;
   generate: () => Promise<ComfyGenerationResult>;
   persist: (result: ComfyGenerationResult) => Promise<void>;
+  discard: (asset: ComfyAsset) => Promise<void>;
 }): Promise<void> {
   const status = await deps.status();
   deps.requireReady(status);
-  if (!(await deps.eject())) {
-    throw new Error("The local chat model could not be unloaded.");
-  }
   const result = await deps.generate();
-  await deps.persist(result);
+  try {
+    await deps.persist(result);
+  } catch (error) {
+    await deps.discard(result.asset).catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function runComfyReroll(deps: {
   status: () => Promise<ComfyStatus>;
   requireReady: (status: ComfyStatus) => void;
-  shouldEject: () => boolean;
-  eject: () => Promise<boolean>;
   generate: () => Promise<ComfyGenerationResult>;
   persistAsset: (asset: ComfyAsset) => Promise<void>;
-}): Promise<void> {
+  discard: (asset: ComfyAsset) => Promise<void>;
+}): Promise<ComfyAsset> {
   const status = await deps.status();
   deps.requireReady(status);
-  if (deps.shouldEject() && !(await deps.eject())) {
-    throw new Error("The local chat model could not be unloaded.");
-  }
   const result = await deps.generate();
-  await deps.persistAsset(result.asset);
+  try {
+    await deps.persistAsset(result.asset);
+  } catch (error) {
+    await deps.discard(result.asset).catch(() => undefined);
+    throw error;
+  }
+  return result.asset;
 }

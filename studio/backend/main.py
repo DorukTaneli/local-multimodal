@@ -322,6 +322,7 @@ from hub.utils.download_registry import (
 from routes.settings import router as settings_router
 from routes.prompts import router as prompts_router
 from features.comfy.router import router as comfy_router
+from features.comfy.coordinator import AcceleratorCoordinationMiddleware
 from auth import storage
 from auth.authentication import get_current_subject
 from utils.hardware import (
@@ -964,6 +965,7 @@ app.add_middleware(
     allow_methods = ["*"],
     allow_headers = ["*"],
 )
+app.add_middleware(AcceleratorCoordinationMiddleware)
 
 
 # ============ Register API Routes ============

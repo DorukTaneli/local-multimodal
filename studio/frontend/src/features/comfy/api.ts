@@ -51,10 +51,17 @@ export async function generateComfyImage(
   );
 }
 
-export async function releaseComfy(): Promise<{ released: boolean; offline: boolean }> {
-  return parseResponse(
-    await authFetch("/api/comfy/release", { method: "POST" }),
+export async function deleteComfyAsset(assetId: string): Promise<void> {
+  const response = await authFetch(
+    `/api/comfy/assets/${encodeURIComponent(assetId)}`,
+    { method: "DELETE" },
   );
+  if (!response.ok && response.status !== 404) {
+    throw new ComfyApiError(
+      `Could not delete generated image (${response.status})`,
+      response.status,
+    );
+  }
 }
 
 export function requireReadyComfy(status: ComfyStatus): void {

@@ -92,7 +92,7 @@ def test_poll_reports_completed_prompt_without_output():
         )
 
     client, http = _client(handler, poll_interval = 0)
-    with pytest.raises(ComfyGenerationError, match = "without a SaveImage output"):
+    with pytest.raises(ComfyGenerationError, match = "without an image output"):
         _drive(client.wait_for_image("prompt-1"))
     _drive(http.aclose())
 
@@ -189,7 +189,7 @@ def test_release_accepts_an_already_unloaded_comfy():
     _drive(http.aclose())
 
 
-def test_release_requests_cleanup_but_rejects_unobservable_cpu_memory():
+def test_release_allows_cpu_only_comfy_after_cleanup_is_accepted():
     requests = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -214,11 +214,7 @@ def test_release_requests_cleanup_but_rejects_unobservable_cpu_memory():
         pytest.fail(f"release must not manufacture a prompt/history proof: {request.url.path}")
 
     client, http = _client(handler, poll_interval = 0)
-    with pytest.raises(
-        ComfyReleaseUnverifiableError,
-        match = "Stop ComfyUI before retrying",
-    ):
-        _drive(client.release())
+    _drive(client.release())
     assert requests == [
         ("GET", "/prompt"),
         ("POST", "/free"),

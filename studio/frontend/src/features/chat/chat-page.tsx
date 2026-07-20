@@ -143,7 +143,6 @@ import {
   listStoredChatThreads,
 } from "./utils/chat-history-storage";
 import { isAssistantLocalThreadId } from "./utils/thread-ids";
-import { ComfyModelLifecycleProvider } from "@/features/comfy/lifecycle-provider";
 
 
 const ProjectSourcesPanel = lazy(() =>
@@ -2541,7 +2540,6 @@ export function ChatPage({
     // Provides `active` to ChatRuntimeProvider (drops the message views/composers
     // while off-route, keeping the runtime alive) and to the compare chrome.
     <ChatActiveContext.Provider value={active}>
-    <ComfyModelLifecycleProvider ejectModel={ejectModel}>
     <div className="flex min-h-0 min-w-0 flex-1 basis-0 bg-background overflow-hidden">
       {/* Portaled surfaces render to document.body, escaping the parent's hidden
           wrapper, so gate them on `active` to keep them off other tabs. */}
@@ -2868,7 +2866,6 @@ export function ChatPage({
         }
       />
     </div>
-    </ComfyModelLifecycleProvider>
     </ChatActiveContext.Provider>
   );
 }

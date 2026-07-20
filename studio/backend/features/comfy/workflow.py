@@ -23,7 +23,7 @@ _REQUIRED_NODES = {
     "4": "EmptyLatentImage",
     "5": "KSampler",
     "6": "VAEDecode",
-    "7": "SaveImage",
+    "7": "PreviewImage",
 }
 
 
@@ -53,6 +53,15 @@ def load_workflow() -> dict[str, Any]:
         raw = json.loads(path.read_text(encoding = "utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise WorkflowError(f"Could not load ComfyUI workflow at {path}: {exc}") from exc
+    # Existing installations may still contain the first fork workflow, which
+    # used SaveImage and duplicated every durable Studio asset in Comfy output.
+    # Upgrade that single known node in memory; new installs ship PreviewImage.
+    node = raw.get("7") if isinstance(raw, dict) else None
+    if isinstance(node, dict) and node.get("class_type") == "SaveImage":
+        node["class_type"] = "PreviewImage"
+        inputs = node.get("inputs")
+        if isinstance(inputs, dict):
+            inputs.pop("filename_prefix", None)
     validate_workflow(raw)
     return raw
 
@@ -88,9 +97,6 @@ def validate_workflow(workflow: Any) -> None:
     sampler = _node_inputs(workflow, "5")
     if not isinstance(sampler.get("seed"), int):
         raise WorkflowError("ComfyUI workflow node 5 has no integer seed.")
-    save = _node_inputs(workflow, "7")
-    if not isinstance(save.get("filename_prefix"), str):
-        raise WorkflowError("ComfyUI workflow node 7 has no filename prefix.")
     latent = _node_inputs(workflow, "4")
     for name in ("width", "height"):
         value = latent.get(name)
@@ -127,19 +133,15 @@ def mutate_workflow(
     *,
     prompt: str,
     seed: int,
-    filename_prefix: str,
 ) -> dict[str, Any]:
-    """Return a deep copy with only the three per-generation inputs changed."""
+    """Return a deep copy with only the two per-generation inputs changed."""
     validate_workflow(workflow)
     if not prompt.strip():
         raise ValueError("The effective prompt cannot be blank.")
     if seed < 0:
         raise ValueError("The seed cannot be negative.")
-    if not filename_prefix.strip():
-        raise ValueError("The filename prefix cannot be blank.")
 
     mutated = deepcopy(workflow)
     mutated["2"]["inputs"]["text"] = prompt
     mutated["5"]["inputs"]["seed"] = seed
-    mutated["7"]["inputs"]["filename_prefix"] = filename_prefix
     return mutated

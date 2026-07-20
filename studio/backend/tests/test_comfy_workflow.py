@@ -41,7 +41,6 @@ def test_mutation_is_immutable_and_changes_only_required_inputs():
         canonical,
         prompt = "masterpiece, 1girl, wink",
         seed = 42,
-        filename_prefix = "LocalMultimodal_test",
     )
 
     assert canonical == original
@@ -49,7 +48,6 @@ def test_mutation_is_immutable_and_changes_only_required_inputs():
     assert _changed_paths(canonical, mutated) == {
         ("2", "inputs", "text"),
         ("5", "inputs", "seed"),
-        ("7", "inputs", "filename_prefix"),
     }
 
 
@@ -82,3 +80,16 @@ def test_resolution_reports_all_missing_locations(tmp_path, monkeypatch):
     monkeypatch.setattr(workflow_module, "REPOSITORY_ROOT", tmp_path / "repository")
     with pytest.raises(WorkflowError, match = "workflow is missing"):
         resolve_workflow_path()
+
+
+def test_load_migrates_installed_save_image_to_preview_staging(tmp_path, monkeypatch):
+    workflow = _canonical()
+    workflow["7"]["class_type"] = "SaveImage"
+    workflow["7"]["inputs"]["filename_prefix"] = "legacy"
+    installed = tmp_path / "workflow.json"
+    installed.write_text(json.dumps(workflow), encoding = "utf-8")
+    monkeypatch.setattr(workflow_module, "resolve_workflow_path", lambda: installed)
+
+    loaded = workflow_module.load_workflow()
+    assert loaded["7"]["class_type"] == "PreviewImage"
+    assert "filename_prefix" not in loaded["7"]["inputs"]

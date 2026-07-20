@@ -4,7 +4,6 @@
 /// <reference types="node" />
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import { markThreadIncognito } from "../chat/utils/thread-ids.ts";
 import { isComfyGenerationEligible } from "./eligibility.ts";
@@ -96,7 +95,7 @@ test("serializer accepts only a complete Comfy result", () => {
   );
 });
 
-test("initial generation orders preflight, eject, generate, then persistence", async () => {
+test("initial generation orders preflight, generate, then persistence", async () => {
   const calls: string[] = [];
   await runGenerationAfterReview({
     status: async () => {
@@ -104,10 +103,6 @@ test("initial generation orders preflight, eject, generate, then persistence", a
       return ready;
     },
     requireReady: () => calls.push("ready"),
-    eject: async () => {
-      calls.push("eject");
-      return true;
-    },
     generate: async () => {
       calls.push("generate");
       return generated;
@@ -115,8 +110,9 @@ test("initial generation orders preflight, eject, generate, then persistence", a
     persist: async () => {
       calls.push("persist");
     },
+    discard: async () => calls.push("discard"),
   });
-  assert.deepEqual(calls, ["status", "ready", "eject", "generate", "persist"]);
+  assert.deepEqual(calls, ["status", "ready", "generate", "persist"]);
 });
 
 test("initial failures do not persist incomplete tool parts", async () => {
@@ -125,13 +121,13 @@ test("initial failures do not persist incomplete tool parts", async () => {
     runGenerationAfterReview({
       status: async () => ready,
       requireReady: () => undefined,
-      eject: async () => true,
       generate: async () => {
         throw new Error("generation failed");
       },
       persist: async () => {
         persisted = true;
       },
+      discard: async () => undefined,
     }),
   );
   assert.equal(persisted, false);
@@ -149,10 +145,6 @@ test("failed preflight leaves the chat model loaded", async () => {
         calls.push("ready");
         throw new Error("checkpoint missing");
       },
-      eject: async () => {
-        calls.push("eject");
-        return true;
-      },
       generate: async () => {
         calls.push("generate");
         return generated;
@@ -160,12 +152,13 @@ test("failed preflight leaves the chat model loaded", async () => {
       persist: async () => {
         calls.push("persist");
       },
+      discard: async () => calls.push("discard"),
     }),
   );
   assert.deepEqual(calls, ["status", "ready"]);
 });
 
-test("reroll skips eject without a local model and persists only on success", async () => {
+test("reroll persists only after backend generation succeeds", async () => {
   const calls: string[] = [];
   await runComfyReroll({
     status: async () => {
@@ -173,11 +166,6 @@ test("reroll skips eject without a local model and persists only on success", as
       return ready;
     },
     requireReady: () => undefined,
-    shouldEject: () => false,
-    eject: async () => {
-      calls.push("eject");
-      return true;
-    },
     generate: async () => {
       calls.push("generate");
       return generated;
@@ -185,6 +173,7 @@ test("reroll skips eject without a local model and persists only on success", as
     persistAsset: async () => {
       calls.push("persist");
     },
+    discard: async () => calls.push("discard"),
   });
   assert.deepEqual(calls, ["status", "generate", "persist"]);
 });
@@ -195,20 +184,19 @@ test("failed rerolls leave the persisted tool part unchanged", async () => {
     runComfyReroll({
       status: async () => ready,
       requireReady: () => undefined,
-      shouldEject: () => true,
-      eject: async () => true,
       generate: async () => {
         throw new Error("generation failed");
       },
       persistAsset: async () => {
         persisted = true;
       },
+      discard: async () => undefined,
     }),
   );
   assert.equal(persisted, false);
 });
 
-test("reroll with a loaded local model ejects before generation", async () => {
+test("failed reroll persistence discards the unreferenced generated asset", async () => {
   const calls: string[] = [];
   await runComfyReroll({
     status: async () => {
@@ -216,31 +204,18 @@ test("reroll with a loaded local model ejects before generation", async () => {
       return ready;
     },
     requireReady: () => calls.push("ready"),
-    shouldEject: () => true,
-    eject: async () => {
-      calls.push("eject");
-      return true;
-    },
     generate: async () => {
       calls.push("generate");
       return generated;
     },
     persistAsset: async () => {
       calls.push("persist");
+      throw new Error("save failed");
     },
-  });
-  assert.deepEqual(calls, ["status", "ready", "eject", "generate", "persist"]);
-});
-
-test("central local-model load releases ComfyUI before unload and load", () => {
-  const source = readFileSync(
-    new URL("../chat/hooks/use-chat-model-runtime.ts", import.meta.url),
-    "utf8",
+    discard: async () => calls.push("discard"),
+  }).then(
+    () => assert.fail("persistence failure must reject"),
+    () => undefined,
   );
-  const releaseIndex = source.indexOf("await releaseComfyBeforeLocalModelLoad()");
-  const unloadIndex = source.indexOf("await unloadModel({ model_path: currentCheckpoint })");
-  const loadIndex = source.indexOf("const loadResponse = await loadModel({");
-  assert.ok(releaseIndex >= 0, "central model-load seam must release ComfyUI");
-  assert.ok(releaseIndex < unloadIndex, "ComfyUI release must precede local chat unload");
-  assert.ok(releaseIndex < loadIndex, "ComfyUI release must precede local chat load");
+  assert.deepEqual(calls, ["status", "ready", "generate", "persist", "discard"]);
 });

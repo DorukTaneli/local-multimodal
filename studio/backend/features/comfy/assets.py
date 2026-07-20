@@ -60,3 +60,11 @@ def resolve_png_asset(asset_id: str) -> Path:
     if resolved.suffix.lower() != ".png" or signature != PNG_SIGNATURE:
         raise AssetError("Generated image was not found.")
     return resolved
+
+
+def delete_png_asset(asset_id: str) -> None:
+    path = resolve_png_asset(asset_id)
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise AssetError(f"Could not delete generated image: {exc}") from exc

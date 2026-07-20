@@ -4,15 +4,18 @@
 import { authFetch } from "@/features/auth";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
-import { isExternalModelId } from "../chat/external-providers";
 import { useChatRuntimeStore } from "../chat/stores/chat-runtime-store";
 import { useAui, useAuiState, type ToolCallMessagePartComponent } from "@assistant-ui/react";
 import { RefreshCwIcon } from "lucide-react";
 import { memo, useEffect, useState } from "react";
-import { generateComfyImage, getComfyStatus, requireReadyComfy } from "./api";
-import { useComfyModelLifecycle } from "./use-model-lifecycle";
+import {
+  deleteComfyAsset,
+  generateComfyImage,
+  getComfyStatus,
+  requireReadyComfy,
+} from "./api";
 import { runComfyReroll } from "./operations";
-import { appendComfyAsset } from "./persistence";
+import { replaceComfyAsset } from "./persistence";
 import { COMFY_TOOL_NAME, type ComfyAsset, type ComfyToolResult } from "./types";
 
 function ComfyAssetImage({ asset }: { asset: ComfyAsset }) {
@@ -64,10 +67,11 @@ function ComfyAssetImage({ asset }: { asset: ComfyAsset }) {
 
 const ComfyImageRendererImpl: ToolCallMessagePartComponent = (props) => {
   const aui = useAui();
-  const ejectModel = useComfyModelLifecycle();
   const messageId = useAuiState(({ message }) => message.id);
   const messageContent = useAuiState(({ message }) => message.content);
   const remoteId = useAuiState(({ threadListItem }) => threadListItem.remoteId);
+  const threadRunning = useAuiState(({ thread }) => thread.isRunning);
+  const modelLoading = useChatRuntimeStore((state) => state.modelLoading);
   const [rerolling, setRerolling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const result = props.result as ComfyToolResult | undefined;
@@ -93,6 +97,10 @@ const ComfyImageRendererImpl: ToolCallMessagePartComponent = (props) => {
   }
 
   const reroll = async () => {
+    if (threadRunning || modelLoading) {
+      setError("Wait for the chat response or model load to finish before rerolling.");
+      return;
+    }
     if (!remoteId || !toolCallId) {
       setError("This image is not attached to a saved chat.");
       return;
@@ -100,18 +108,13 @@ const ComfyImageRendererImpl: ToolCallMessagePartComponent = (props) => {
     setRerolling(true);
     setError(null);
     try {
-      await runComfyReroll({
+      const replacement = await runComfyReroll({
         status: getComfyStatus,
         requireReady: requireReadyComfy,
-        shouldEject: () => {
-          const current = useChatRuntimeStore.getState().params.checkpoint;
-          return Boolean(current && !isExternalModelId(current));
-        },
-        eject: ejectModel,
         generate: () =>
           generateComfyImage({ effectivePrompt: result.effectivePrompt }),
         persistAsset: (asset) =>
-          appendComfyAsset({
+          replaceComfyAsset({
             thread: {
               export: () => aui.thread().export(),
               import: (repository) => aui.thread().import(repository),
@@ -121,7 +124,13 @@ const ComfyImageRendererImpl: ToolCallMessagePartComponent = (props) => {
             toolCallId,
             asset,
           }),
+        discard: (asset) => deleteComfyAsset(asset.assetId),
       });
+      await Promise.allSettled(
+        result.assets
+          .filter((asset) => asset.assetId !== replacement.assetId)
+          .map((asset) => deleteComfyAsset(asset.assetId)),
+      );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Reroll failed.");
     } finally {
@@ -145,7 +154,7 @@ const ComfyImageRendererImpl: ToolCallMessagePartComponent = (props) => {
         <Button
           size="sm"
           variant="outline"
-          disabled={rerolling}
+          disabled={rerolling || threadRunning || modelLoading}
           onClick={() => void reroll()}
         >
           {rerolling ? <Spinner /> : <RefreshCwIcon className="size-4" />}

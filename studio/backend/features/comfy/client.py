@@ -156,7 +156,9 @@ class ComfyClient:
         except TimeoutError as exc:
             raise self._release_timeout_error() from exc
 
-    async def _torch_vram_reserved_snapshot(self, *, deadline: float) -> tuple[int, ...]:
+    async def _torch_vram_reserved_snapshot(
+        self, *, deadline: float
+    ) -> tuple[tuple[int, ...], frozenset[str]]:
         response = await self._request_before_deadline(
             "GET", "/system_stats", deadline = deadline
         )
@@ -165,10 +167,13 @@ class ComfyClient:
         if not isinstance(devices, list) or not devices:
             raise ComfyError("ComfyUI returned invalid device memory statistics.")
         reserved_values: list[int] = []
+        unobservable_types: set[str] = set()
         for device in devices:
             if not isinstance(device, dict):
                 raise ComfyError("ComfyUI returned invalid device memory statistics.")
-            if device.get("type") in UNOBSERVABLE_VRAM_DEVICE_TYPES:
+            device_type = str(device.get("type") or "").lower()
+            if device_type in UNOBSERVABLE_VRAM_DEVICE_TYPES:
+                unobservable_types.add(device_type)
                 continue
             value = device.get("torch_vram_total")
             if (
@@ -178,7 +183,7 @@ class ComfyClient:
             ):
                 raise ComfyError("ComfyUI returned invalid device memory statistics.")
             reserved_values.append(int(value))
-        return tuple(reserved_values)
+        return tuple(reserved_values), frozenset(unobservable_types)
 
     async def _queue_remaining(self, *, deadline: float) -> int:
         response = await self._request_before_deadline(
@@ -292,7 +297,7 @@ class ComfyClient:
                     return image
                 if completed or status_str == "success":
                     raise ComfyGenerationError(
-                        f"ComfyUI completed prompt {prompt_id} without a SaveImage output."
+                        f"ComfyUI completed prompt {prompt_id} without an image output."
                     )
             await asyncio.sleep(self.poll_interval)
 
@@ -325,8 +330,12 @@ class ComfyClient:
                 json = {"unload_models": True, "free_memory": True},
             )
 
-            reserved = await self._torch_vram_reserved_snapshot(deadline = deadline)
+            reserved, unobservable = await self._torch_vram_reserved_snapshot(deadline = deadline)
             if not reserved:
+                if unobservable == {"cpu"}:
+                    # CPU-only Comfy has no discrete accelerator allocation to
+                    # hand off. The accepted cleanup request is sufficient.
+                    return
                 # ComfyUI's /free response only acknowledges that worker flags
                 # were set. The worker emits no event after consuming them, and
                 # prompt history is written before unload_all_models runs. A
@@ -345,14 +354,16 @@ class ComfyClient:
                     # New work won the race after the idle check. Let it drain,
                     # then issue a fresh /free after its models are no longer in use.
                     break
-                reserved = await self._torch_vram_reserved_snapshot(deadline = deadline)
+                reserved, _unobservable = await self._torch_vram_reserved_snapshot(
+                    deadline = deadline
+                )
                 if self._model_memory_is_released(reserved):
                     released_polls += 1
                     if released_polls >= RELEASE_STABLE_POLLS:
                         # Recheck both signals before handing VRAM to llama.cpp.
                         if await self._queue_remaining(deadline = deadline) != 0:
                             break
-                        final_reserved = await self._torch_vram_reserved_snapshot(
+                        final_reserved, _final_unobservable = await self._torch_vram_reserved_snapshot(
                             deadline = deadline
                         )
                         if (

@@ -93,15 +93,14 @@
   },
   "7": {
     "inputs": {
-      "filename_prefix": "PrefectIllustriousXL",
       "images": [
         "6",
         0
       ]
     },
-    "class_type": "SaveImage",
+    "class_type": "PreviewImage",
     "_meta": {
-      "title": "Save Image"
+      "title": "Preview Image"
     }
   }
 }

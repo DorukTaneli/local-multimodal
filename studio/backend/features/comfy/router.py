@@ -5,16 +5,13 @@
 
 from __future__ import annotations
 
-import asyncio
-from contextlib import asynccontextmanager
 import secrets
-from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
 from auth.authentication import get_current_subject
-from .assets import AssetError, resolve_png_asset, save_png
+from .assets import AssetError, delete_png_asset, resolve_png_asset, save_png
 from .client import (
     ComfyCheckpointError,
     ComfyClient,
@@ -23,6 +20,11 @@ from .client import (
     ComfyReleaseTimeout,
     ComfyReleaseUnverifiableError,
     ComfyUnavailableError,
+)
+from .coordinator import (
+    AcceleratorBusyError,
+    ChatModelUnloadError,
+    accelerator_coordinator,
 )
 from .models import (
     GenerateRequest,
@@ -43,26 +45,6 @@ from .workflow import (
 
 
 router = APIRouter(dependencies = [Depends(get_current_subject)])
-_operation_lock = asyncio.Lock()
-
-
-class ComfyBusyError(RuntimeError):
-    pass
-
-
-@asynccontextmanager
-async def operation_slot():
-    # Lock.acquire() does not suspend when the lock is free, so this check and
-    # acquisition are atomic with respect to other tasks on the same event loop.
-    if _operation_lock.locked():
-        raise ComfyBusyError("ComfyUI is busy with image generation or memory release.")
-    await _operation_lock.acquire()
-    try:
-        yield
-    finally:
-        _operation_lock.release()
-
-
 def _request_prompt(payload: GenerateRequest, workflow: dict) -> str:
     reroll = payload.effectivePrompt is not None
     initial_supplied = payload.imageTags is not None or payload.conversationTags is not None
@@ -111,9 +93,11 @@ async def status() -> StatusResponse:
     except ComfyError as exc:
         failures.append(str(exc))
 
-    busy = _operation_lock.locked()
+    busy = accelerator_coordinator.busy
     if busy:
-        failures.append("ComfyUI is busy with image generation or memory release.")
+        failures.append(
+            f"The accelerator is busy with {accelerator_coordinator.operation or 'another operation'}."
+        )
     ready = reachable and workflow_valid and checkpoint_available and not busy
     return StatusResponse(
         ready = ready,
@@ -129,7 +113,7 @@ async def status() -> StatusResponse:
 @router.post("/generate", response_model = GenerateResponse)
 async def generate(payload: GenerateRequest) -> GenerateResponse:
     try:
-        async with operation_slot():
+        async with accelerator_coordinator.slot("image generation"):
             workflow = load_workflow()
             try:
                 prompt = _request_prompt(payload, workflow)
@@ -143,11 +127,11 @@ async def generate(payload: GenerateRequest) -> GenerateResponse:
                 workflow,
                 prompt = prompt,
                 seed = seed,
-                filename_prefix = f"LocalMultimodal_{uuid4().hex}",
             )
             width, height = image_dimensions(workflow)
             async with ComfyClient() as client:
                 await client.preflight(checkpoint)
+                await accelerator_coordinator.unload_chat_model()
                 _prompt_id, png = await client.generate(generated_workflow, save_node_id = "7")
             asset_id = save_png(png)
             return GenerateResponse(
@@ -159,7 +143,9 @@ async def generate(payload: GenerateRequest) -> GenerateResponse:
                     height = height,
                 ),
             )
-    except ComfyBusyError as exc:
+    except AcceleratorBusyError as exc:
+        raise HTTPException(status_code = 409, detail = str(exc)) from exc
+    except ChatModelUnloadError as exc:
         raise HTTPException(status_code = 409, detail = str(exc)) from exc
     except WorkflowError as exc:
         raise HTTPException(status_code = 503, detail = str(exc)) from exc
@@ -176,7 +162,7 @@ async def generate(payload: GenerateRequest) -> GenerateResponse:
 @router.post("/release", response_model = ReleaseResponse)
 async def release() -> ReleaseResponse:
     try:
-        async with operation_slot():
+        async with accelerator_coordinator.slot("ComfyUI memory release"):
             try:
                 async with ComfyClient() as client:
                     await client.release()
@@ -192,7 +178,7 @@ async def release() -> ReleaseResponse:
             except ComfyError as exc:
                 raise HTTPException(status_code = 502, detail = str(exc)) from exc
             return ReleaseResponse()
-    except ComfyBusyError as exc:
+    except AcceleratorBusyError as exc:
         raise HTTPException(status_code = 409, detail = str(exc)) from exc
 
 
@@ -203,3 +189,11 @@ async def asset(asset_id: str) -> FileResponse:
     except AssetError as exc:
         raise HTTPException(status_code = 404, detail = str(exc)) from exc
     return FileResponse(path, media_type = "image/png")
+
+
+@router.delete("/assets/{asset_id}", status_code = 204)
+async def delete_asset(asset_id: str) -> None:
+    try:
+        delete_png_asset(asset_id)
+    except AssetError as exc:
+        raise HTTPException(status_code = 404, detail = str(exc)) from exc

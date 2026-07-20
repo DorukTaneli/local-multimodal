@@ -71,7 +71,7 @@ export async function appendComfyToolPart(args: {
   });
 }
 
-export async function appendComfyAsset(args: {
+export async function replaceComfyAsset(args: {
   thread: ThreadImportExport;
   messageId: string;
   remoteId: string;
@@ -99,7 +99,7 @@ export async function appendComfyAsset(args: {
           ...candidate,
           result: {
             ...candidate.result,
-            assets: [...candidate.result.assets, args.asset],
+            assets: [args.asset],
           },
         };
       });
