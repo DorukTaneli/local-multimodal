@@ -205,6 +205,16 @@ cd unsloth; git pull
 unsloth studio -p 8888
 ```
 
+#### Local Multimodal coexistence on Windows
+
+From a Local Multimodal clone, run `.\install-local-multimodal.ps1`. This installs into `%USERPROFILE%\.local-multimodal\studio` and creates the separate `local-multimodal` command, leaving the official Unsloth Studio home and `unsloth` command unchanged.
+
+Run ComfyUI locally and make `prefectIllustriousXL_v70.safetensors` available in its checkpoints folder. The installer copies the required ComfyUI workflow into the private Studio home. Open a new PowerShell window and launch the fork on the recommended alternate port:
+
+```powershell
+local-multimodal -p 8889
+```
+
 #### Remote access: `--secure` (HTTPS tunnel) vs raw port
 By default `unsloth studio` binds to `127.0.0.1` (this machine only). To reach it from another device, pick one of:
 

@@ -321,6 +321,8 @@ from hub.utils.download_registry import (
 )
 from routes.settings import router as settings_router
 from routes.prompts import router as prompts_router
+from features.comfy.router import router as comfy_router
+from features.comfy.coordinator import AcceleratorCoordinationMiddleware
 from auth import storage
 from auth.authentication import get_current_subject
 from utils.hardware import (
@@ -963,6 +965,7 @@ app.add_middleware(
     allow_methods = ["*"],
     allow_headers = ["*"],
 )
+app.add_middleware(AcceleratorCoordinationMiddleware)
 
 
 # ============ Register API Routes ============
@@ -984,6 +987,7 @@ app.include_router(providers_router, prefix = "/api/providers", tags = ["provide
 app.include_router(settings_router, prefix = "/api/settings", tags = ["settings"])
 app.include_router(mcp_servers_router, prefix = "/api/mcp/servers", tags = ["mcp"])
 app.include_router(prompts_router, prefix = "/api/prompts", tags = ["prompts"])
+app.include_router(comfy_router, prefix = "/api/comfy", tags = ["comfy"])
 app.include_router(datasets_router, prefix = "/api/datasets", tags = ["datasets"])
 app.include_router(data_recipe_router, prefix = "/api/data-recipe", tags = ["data-recipe"])
 app.include_router(llama_router, prefix = "/api/llama", tags = ["llama"])

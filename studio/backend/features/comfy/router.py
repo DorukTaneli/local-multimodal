@@ -1,0 +1,199 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
+"""Authenticated Studio API for local ComfyUI generation and asset serving."""
+
+from __future__ import annotations
+
+import secrets
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
+
+from auth.authentication import get_current_subject
+from .assets import AssetError, delete_png_asset, resolve_png_asset, save_png
+from .client import (
+    ComfyCheckpointError,
+    ComfyClient,
+    ComfyError,
+    ComfyGenerationTimeout,
+    ComfyReleaseTimeout,
+    ComfyReleaseUnverifiableError,
+    ComfyUnavailableError,
+)
+from .coordinator import (
+    AcceleratorBusyError,
+    ChatModelUnloadError,
+    accelerator_coordinator,
+)
+from .models import (
+    GenerateRequest,
+    GeneratedAsset,
+    GenerateResponse,
+    JSON_SAFE_INTEGER_MAX,
+    ReleaseResponse,
+    StatusResponse,
+)
+from .workflow import (
+    WorkflowError,
+    checkpoint_name,
+    effective_prompt,
+    image_dimensions,
+    load_workflow,
+    mutate_workflow,
+)
+
+
+router = APIRouter(dependencies = [Depends(get_current_subject)])
+def _request_prompt(payload: GenerateRequest, workflow: dict) -> str:
+    reroll = payload.effectivePrompt is not None
+    initial_supplied = payload.imageTags is not None or payload.conversationTags is not None
+    if reroll and initial_supplied:
+        raise ValueError("Provide either effectivePrompt or imageTags and conversationTags, not both.")
+    if reroll:
+        if not payload.effectivePrompt or not payload.effectivePrompt.strip():
+            raise ValueError("effectivePrompt cannot be blank.")
+        return payload.effectivePrompt
+    if payload.imageTags is None or payload.conversationTags is None:
+        raise ValueError("imageTags and conversationTags are required for initial generation.")
+    return effective_prompt(
+        workflow,
+        image_tags = payload.imageTags,
+        conversation_tags = payload.conversationTags,
+    )
+
+
+@router.get("/status", response_model = StatusResponse)
+async def status() -> StatusResponse:
+    failures: list[str] = []
+    workflow = None
+    checkpoint = None
+    try:
+        workflow = load_workflow()
+        checkpoint = checkpoint_name(workflow)
+        workflow_valid = True
+    except WorkflowError as exc:
+        workflow_valid = False
+        failures.append(str(exc))
+
+    reachable = False
+    checkpoint_available = False
+    try:
+        async with ComfyClient() as client:
+            await client.check_reachable()
+            reachable = True
+            if checkpoint:
+                checkpoints = await client.available_checkpoints()
+                checkpoint_available = checkpoint in checkpoints
+                if not checkpoint_available:
+                    failures.append(
+                        f"ComfyUI checkpoint {checkpoint!r} is not installed. "
+                        "Add it to ComfyUI's checkpoints folder and refresh ComfyUI."
+                    )
+    except ComfyError as exc:
+        failures.append(str(exc))
+
+    busy = accelerator_coordinator.busy
+    if busy:
+        failures.append(
+            f"The accelerator is busy with {accelerator_coordinator.operation or 'another operation'}."
+        )
+    ready = reachable and workflow_valid and checkpoint_available and not busy
+    return StatusResponse(
+        ready = ready,
+        reachable = reachable,
+        workflowValid = workflow_valid,
+        checkpointAvailable = checkpoint_available,
+        busy = busy,
+        checkpoint = checkpoint,
+        failures = failures,
+    )
+
+
+@router.post("/generate", response_model = GenerateResponse)
+async def generate(payload: GenerateRequest) -> GenerateResponse:
+    try:
+        async with accelerator_coordinator.slot("image generation"):
+            workflow = load_workflow()
+            try:
+                prompt = _request_prompt(payload, workflow)
+            except ValueError as exc:
+                raise HTTPException(status_code = 400, detail = str(exc)) from exc
+            checkpoint = checkpoint_name(workflow)
+            # JSON numbers are decoded as IEEE-754 doubles by the frontend.
+            # Stay within the exact integer range so persisted seeds remain reproducible.
+            seed = secrets.randbelow(JSON_SAFE_INTEGER_MAX + 1)
+            generated_workflow = mutate_workflow(
+                workflow,
+                prompt = prompt,
+                seed = seed,
+            )
+            width, height = image_dimensions(workflow)
+            async with ComfyClient() as client:
+                await client.preflight(checkpoint)
+                await accelerator_coordinator.unload_chat_model()
+                _prompt_id, png = await client.generate(generated_workflow, save_node_id = "7")
+            asset_id = save_png(png)
+            return GenerateResponse(
+                effectivePrompt = prompt,
+                asset = GeneratedAsset(
+                    assetId = str(asset_id),
+                    seed = seed,
+                    width = width,
+                    height = height,
+                ),
+            )
+    except AcceleratorBusyError as exc:
+        raise HTTPException(status_code = 409, detail = str(exc)) from exc
+    except ChatModelUnloadError as exc:
+        raise HTTPException(status_code = 409, detail = str(exc)) from exc
+    except WorkflowError as exc:
+        raise HTTPException(status_code = 503, detail = str(exc)) from exc
+    except ComfyCheckpointError as exc:
+        raise HTTPException(status_code = 503, detail = str(exc)) from exc
+    except ComfyUnavailableError as exc:
+        raise HTTPException(status_code = 503, detail = str(exc)) from exc
+    except ComfyGenerationTimeout as exc:
+        raise HTTPException(status_code = 504, detail = str(exc)) from exc
+    except (ComfyError, AssetError) as exc:
+        raise HTTPException(status_code = 502, detail = str(exc)) from exc
+
+
+@router.post("/release", response_model = ReleaseResponse)
+async def release() -> ReleaseResponse:
+    try:
+        async with accelerator_coordinator.slot("ComfyUI memory release"):
+            try:
+                async with ComfyClient() as client:
+                    await client.release()
+            except ComfyUnavailableError:
+                return ReleaseResponse(offline = True)
+            except ComfyReleaseTimeout as exc:
+                raise HTTPException(status_code = 504, detail = str(exc)) from exc
+            except ComfyReleaseUnverifiableError as exc:
+                # ComfyUI is online, but its current backend cannot prove that
+                # memory cleanup finished. The caller must change that state by
+                # stopping ComfyUI or using an observable accelerator backend.
+                raise HTTPException(status_code = 409, detail = str(exc)) from exc
+            except ComfyError as exc:
+                raise HTTPException(status_code = 502, detail = str(exc)) from exc
+            return ReleaseResponse()
+    except AcceleratorBusyError as exc:
+        raise HTTPException(status_code = 409, detail = str(exc)) from exc
+
+
+@router.get("/assets/{asset_id}")
+async def asset(asset_id: str) -> FileResponse:
+    try:
+        path = resolve_png_asset(asset_id)
+    except AssetError as exc:
+        raise HTTPException(status_code = 404, detail = str(exc)) from exc
+    return FileResponse(path, media_type = "image/png")
+
+
+@router.delete("/assets/{asset_id}", status_code = 204)
+async def delete_asset(asset_id: str) -> None:
+    try:
+        delete_png_asset(asset_id)
+    except AssetError as exc:
+        raise HTTPException(status_code = 404, detail = str(exc)) from exc

@@ -175,6 +175,8 @@ import {
 } from "react";
 import { create } from "zustand";
 import { extractTaggedText, updateThreadMessage } from "@/features/chat/utils/update-thread-message";
+import { ComfyGenerateImageAction } from "@/features/comfy/generate-image-action";
+import { ComfyImageRenderer } from "@/features/comfy/image-renderer";
 
 // True while a file is dragged anywhere over the chat page, so the composer
 // can show its "Drop files here" affordance.
@@ -3672,6 +3674,7 @@ const AssistantMessage: FC = () => {
                     terminal: TerminalToolUIConfirmable,
                     code_execution: CodeExecutionToolUIConfirmable,
                     image_generation: ImageGenerationToolUIConfirmable,
+                    comfy_generate_image: ComfyImageRenderer,
                     render_html: RenderHtmlToolUIConfirmable,
                   },
                   Fallback: ToolFallbackConfirmable,
@@ -3930,6 +3933,7 @@ const AssistantActionBar: FC = () => {
         className="aui-assistant-action-bar-root col-start-3 row-start-2 flex items-center gap-1 text-chat-icon-fg [&_button:not([data-slot=message-timing-trigger])]:size-8 [&_button]:!rounded-full [&_button:hover]:bg-chat-icon-bg-hover [&_button:hover]:text-chat-icon-fg-hover"
       >
         <CopyButton />
+        <ComfyGenerateImageAction />
         <EditAssistantMessageButton />
         <ActionBarPrimitive.Reload asChild={true}>
           <TooltipIconButton tooltip="Refresh">

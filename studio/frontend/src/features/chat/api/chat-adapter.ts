@@ -102,6 +102,7 @@ import {
   encryptProviderApiKey,
   isProviderKeyRotationError,
 } from "./providers-api";
+import { extractComfyContextProjection } from "@/features/comfy/serialization";
 
 // Small models (<=9B) answer from memory instead of calling search, so "auto"
 // forces retrieval for them and leaves it to larger ones.
@@ -1149,6 +1150,21 @@ function serializeAssistantReplayMessages(
     }
 
     if (part.type === "tool-call") {
+      const comfyProjection = extractComfyContextProjection(part);
+      if (comfyProjection) {
+        if (pendingToolCalls.length > 0) {
+          flushAssistantAndToolResults();
+        }
+        pendingTextParts.push(comfyProjection);
+        continue;
+      }
+      if (
+        (part as { toolName?: unknown }).toolName === "comfy_generate_image"
+      ) {
+        // Never replay Local Multimodal tool calls/results. Incomplete or
+        // malformed records contribute no projected context.
+        continue;
+      }
       const toolPart = part as ToolCallMessagePart;
       const toolCall = serializeAssistantToolCallPart(toolPart);
       if (!toolCall) continue;
